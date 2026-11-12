@@ -122,7 +122,89 @@ t('Team Nassau best ball: 1 match, each winner +bet per decided bet', () => {
 });
 t('Settle-up uses at most n-1 payments', () => { const r = r4(); assert.ok(r.settlements.length <= 3); });
 
-console.log('Fuzz: 2000 random rounds');
+console.log('Nassau presses');
+// X always pars; Y's score per hole derived from result codes: 'a' = X wins (Y bogey), 'b' = Y wins (Y birdie), 'h' = halved, null = not played
+const ys = codes => PARS.map((p, i) => codes[i] == null ? null : p + (codes[i] === 'a' ? 1 : codes[i] === 'b' ? -1 : 0));
+const xs = codes => PARS.map((p, i) => codes[i] == null ? null : p);
+const R2 = (codes, o, presses) => ({ players: [{ name: 'X', index: 0, teeId: 'f' }, { name: 'Y', index: 0, teeId: 'f' }], scores: [xs(codes), ys(codes)],
+  settings: settings(Object.assign({ bet: 1, games: { nassau: true } }, o)), presses: presses || [] });
+const H = n => new Array(n).fill('h');
+const seg = (r, si) => r.nassau.matches[0].segments[si];
+t('Auto 2-down press triggers and press of a press (match play)', () => {
+  const codes = ['a','a','a','a','h','h','h','h','h'].concat(H(9));
+  const r = E.computeRound(R2(codes, { presses: 'auto' }), flat); const f = seg(r, 0);
+  eq(f.presses.map(p => [p.start, p.side, p.auto]), [[2, 'b', true], [4, 'b', true]]); // press from hole 3, press-of-press from hole 5
+  eq(f.presses.map(p => p.result), ['a', 'push']); eq(f.result, 'a');
+  eq(seg(r, 1).presses.length, 0); eq(seg(r, 2).presses.length, 0); // overall not pressed by default
+  eq(r.nassau.money, [3, -3]); // front + press#1 + overall
+  eq(f.presses.map(p => p.status), ['X won 2&1', 'Halved']);
+});
+t('Auto 1-down option cascades presses', () => {
+  const codes = ['a','a','a','a','h','h','h','h','h'].concat(H(9));
+  const f = seg(E.computeRound(R2(codes, { presses: 'auto', pressTrigger: 1 }), flat), 0);
+  eq(f.presses.map(p => p.start), [1, 2, 3, 4]); eq(f.presses.map(p => p.result), ['a', 'a', 'a', 'push']);
+});
+t('Presses on Overall 18 when toggled', () => {
+  const codes = ['a','a'].concat(H(16));
+  const r = E.computeRound(R2(codes, { presses: 'auto', pressOverall: true }), flat);
+  eq(seg(r, 2).presses.map(p => p.start), [2]); eq(seg(r, 0).presses.map(p => p.start), [2]);
+});
+t('Last-hole restriction: 2 down on the last hole of a nine starts no press (auto or manual)', () => {
+  const codes = H(7).concat(['a','a']).concat(H(7)).concat(['a','a']);
+  const rd = R2(codes, { presses: 'both' }); const r = E.computeRound(rd, flat);
+  eq(seg(r, 0).presses.length, 0); // down 2 after hole 9 -> nothing left on front
+  eq(seg(r, 1).presses.length, 0); // down 2 after hole 18
+  eq(E.addPress(rd, flat, '0-1', 0).ok, false);
+  const codes2 = H(16).concat(['a','a']); codes2[15] = 'a'; // 1 down after 16, 2 down after 17 -> press on 18 only
+  eq(seg(E.computeRound(R2(codes2, { presses: 'auto' }), flat), 1).presses.map(p => p.start), [17]);
+  // manual press with 8 holes played: allowed, starts hole 9; none after hole 9 played
+  const rd3 = R2(H(7).concat(['a']), { presses: 'manual' }); const ok = E.addPress(rd3, flat, '0-1', 0); eq([ok.ok, ok.press.start], [true, 8]);
+});
+t('Manual press: down side only, starts next unplayed hole, no duplicates, undo, no auto in manual mode', () => {
+  const rd = R2(['a','a'], { presses: 'manual' });
+  eq(E.addPress(rd, flat, '0-1', 0, 'a').ok, false);           // X is up, cannot press
+  const p = E.addPress(rd, flat, '0-1', 0); eq([p.ok, p.press.side, p.press.start], [true, 'b', 2]);
+  eq(E.addPress(rd, flat, '0-1', 0, 'b').ok, false);           // duplicate on same hole
+  eq(E.addPress(rd, flat, '0-1', 1).ok, false);                // back 9 not started, nobody down
+  let r = E.computeRound(rd, flat); eq(seg(r, 0).presses.map(x => [x.manual, x.undoable]), [[true, true]]);
+  eq(E.undoPress(rd, flat, p.press.id), true); eq(rd.presses.length, 0);
+  const p2 = E.addPress(rd, flat, '0-1', 0);
+  rd.scores[0][2] = 4; // one score entered on the press's first hole -> undo locked
+  eq(E.undoPress(rd, flat, p2.press.id), false); eq(rd.presses.length, 1);
+  // play out: Y wins holes 3-9 => Y wins press 7-0 and front 5 up (closed early); X no auto-press in manual mode
+  const codes = ['a','a','b','b','b','b','b','b','b'].concat(H(9));
+  rd.scores = [xs(codes), ys(codes)]; r = E.computeRound(rd, flat);
+  eq(seg(r, 0).presses.length, 1); eq(seg(r, 0).presses[0].result, 'b'); eq(seg(r, 0).result, 'b');
+  eq(r.nassau.money, [-3, 3]);  // front, press, overall (Y 5 up over 18)
+  const r2 = E.computeRound(Object.assign({}, rd, { settings: Object.assign({}, rd.settings, { presses: 'off' }) }), flat);
+  eq(seg(r2, 0).presses.length, 0); eq(r2.nassau.money, [-2, 2]); // presses ignored when off
+});
+t('Team Nassau (best ball) with auto + manual presses', () => {
+  const T = PARS.map(p => p), B = PARS.map((p, i) => i < 2 ? p + 1 : p);
+  const rd = { players: ['A1','A2','B1','B2'].map(n => ({ name: n, index: 0, teeId: 'f' })), scores: [T, T, B, B], presses: [],
+    settings: settings({ bet: 5, games: { nassau: true }, nassauTeams: true, presses: 'both' }) };
+  let r = E.computeRound(rd, flat); const f = seg(r, 0);
+  eq(r.nassau.matches[0].key, 'T'); eq(f.presses.map(p => [p.start, p.side]), [[2, 'b']]);
+  eq(r.nassau.money, [10, 10, -10, -10]); zeroSum(r); // front + overall to team A; press pushes
+  const rd2 = Object.assign({}, rd, { scores: rd.scores.map(s => s.map((v, i) => i < 3 ? v : null)), presses: [] });
+  const p = E.addPress(rd2, flat, 'T', 0); eq([p.ok, p.press.side, p.press.start], [true, 'b', 3]);
+  eq(seg(E.computeRound(rd2, flat), 0).presses.length, 2); // auto from hole 3 + manual from hole 4
+});
+t('Stroke-play presses: down = net strokes behind', () => {
+  const X0 = PARS.slice(), Y0 = PARS.map((p, i) => i === 0 ? p + 2 : i === 4 ? p - 1 : p); // Y double on 1 (2 behind), birdie on 5
+  const rd = { players: [{ name: 'X', index: 0, teeId: 'f' }, { name: 'Y', index: 0, teeId: 'f' }], scores: [X0, Y0], presses: [], settings: settings({ bet: 1, games: { nassau: true }, nassauMode: 'stroke', presses: 'auto' }) };
+  const r = E.computeRound(rd, flat); const f = seg(r, 0);
+  eq(f.presses.map(p => [p.start, p.side]), [[1, 'b']]); eq(f.result, 'a'); eq(f.presses[0].result, 'b'); // press holes 2-9: Y by 1
+  eq(r.nassau.money, [1, -1]); // front X, press Y, overall X, back push
+  const rd2 = Object.assign({}, rd, { settings: Object.assign({}, rd.settings, { presses: 'manual' }), scores: [X0.map((v,i)=>i<1?v:null), Y0.map((v,i)=>i<1?v:null)] });
+  const p = E.addPress(rd2, flat, '0-1', 0); eq([p.ok, p.press.side, p.press.start], [true, 'b', 1]);
+});
+t('Old saved round without press data still loads', () => {
+  const old = { players: [{ name: 'X', index: 0, teeId: 'f' }, { name: 'Y', index: 0, teeId: 'f' }], scores: [X, Y], settings: { bet: 2, games: { nassau: true, skins: true }, strokeMode: 'low', skinsCarry: true, nassauMode: 'match' } };
+  const r = E.computeRound(old, flat); eq(seg(r, 0).presses.length, 0); eq(r.nassau.money, [0, 0]); zeroSum(r);
+});
+
+console.log('Fuzz: 2000 random rounds (incl. random manual/auto presses)');
 t('Always zero-sum; settlements reconcile; strokes sum to handicap', () => {
   let seed = 7; const rnd = () => (seed = (seed * 1103515245 + 12345) % 2147483648) / 2147483648;
   for (let k = 0; k < 2000; k++){
@@ -130,8 +212,17 @@ t('Always zero-sum; settlements reconcile; strokes sum to handicap', () => {
     const pl = Array.from({ length: n }, (_, i) => ({ name: 'P' + i, index: Math.round((rnd() * 40 - 4) * 10) / 10, teeId: yolo.tees[Math.floor(rnd() * 11)].id }));
     const sc = pl.map(() => PARS.map(p => rnd() < 0.05 ? null : p + Math.floor(rnd() * 5) - 1));
     const st = settings({ bet: [1,2,5][k%3], strokeMode: rnd()<.5?'low':'full', skinsCarry: rnd()<.5, nassauMode: rnd()<.5?'match':'stroke', nassauTeams: n===4 && rnd()<.5, teamPairing: Math.floor(rnd()*3), games: { stableford: rnd()<.7, nassau: rnd()<.7, skins: rnd()<.7 } });
-    const r = E.computeRound({ players: pl, scores: sc, settings: st }, yolo);
+    st.presses = ['off','manual','auto','both'][Math.floor(rnd()*4)]; st.pressTrigger = rnd()<.5?1:2; st.pressOverall = rnd()<.5;
+    const rd = { players: pl, scores: pl.map(() => new Array(18).fill(null)), settings: st, presses: [] };
+    let nm = 0;
+    for (let h = 0; h < 18; h++){ pl.forEach((_, i) => rd.scores[i][h] = sc[i][h]);
+      if (st.games.nassau && (st.presses==='manual'||st.presses==='both') && rnd() < .4){
+        const keys = E.computeRound(rd, yolo).nassau.matches.map(m => m.key);
+        const res = E.addPress(rd, yolo, keys[Math.floor(rnd()*keys.length)], Math.floor(rnd()*3)); if (res.ok){ nm++; assert.ok(res.press.start <= (res.press.s===0?8:17)); }
+      } }
+    const r = E.computeRound(rd, yolo);
     zeroSum(r);
+    if (r.nassau) r.nassau.matches.forEach(m => m.segments.forEach((sg, si) => sg.presses.forEach(p => assert.ok(p.start <= (si===0?8:17) && p.start >= (si===1?9:0)))));
     r.players.forEach(p => { eq(p.strokesFull.reduce((a,b)=>a+b), p.ch); eq(p.strokesMatch.reduce((a,b)=>a+b), p.matchHcp); });
   }
 });

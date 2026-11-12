@@ -37,7 +37,7 @@ function defaultSetup(){
   var c = getCourses()[0];
   var tee = (c.tees.filter(function(t){ return t.id==='blue'; })[0] || c.tees[0]).id;
   return { courseId: c.id, players: [{name:'',index:null,teeId:tee},{name:'',index:null,teeId:tee}],
-    settings: { bet:1, games:{stableford:false, nassau:true, skins:true}, strokeMode:'low', skinsCarry:true, nassauTeams:false, teamPairing:0, nassauMode:'match' } };
+    settings: { bet:1, games:{stableford:false, nassau:true, skins:true}, strokeMode:'low', skinsCarry:true, nassauTeams:false, teamPairing:0, nassauMode:'match', presses:'off', pressTrigger:2, pressOverall:false } };
 }
 var setup = load(LS.setup, null) || defaultSetup();
 var round = load(LS.round, null);
@@ -77,6 +77,7 @@ screens.help = function(){
   + '<p><b>Off the low man</b> (default for Nassau & Skins): the lowest course handicap plays at 0 and everyone else gets the difference. <b>Full handicap</b>: everyone gets their full course handicap. Stableford always uses full course handicap.</p>'
   + '<h2>Stableford</h2><p>Points on net score: double bogey or worse 0, bogey 1, par 2, birdie 3, eagle 4, albatross 5. <b>Payout:</b> you win/lose the bet amount for every point of difference against each other player (e.g. $2 game, you have 36 and Joe has 31 → Joe pays you $10).</p>'
   + '<h2>Nassau</h2><p>Three bets: Front 9, Back 9, Overall 18, each worth the bet amount. Match play (most holes won on net) by default, or stroke play (lowest net total). With 3–4 players every pair plays its own Nassau. Ties push. With 4 players you can instead play 2-man teams, best net ball; each winner collects the bet from an opponent. Matches can close out early (e.g. 3&2).</p>'
+  + '<h2>Presses</h2><p>A press is a new bet for the same amount that starts on the next hole and runs to the end of that nine (or the 18 for the Overall, if “Presses on Overall 18” is on). <b>Manual:</b> when a side is down in a match, a <b>Press</b> button appears in Game status for that match and nine; it starts on the next unplayed hole. A mis-tapped press can be undone until a score is entered on its first hole. <b>Auto:</b> whenever a side goes 2 down (or 1 down, if chosen) in any bet — the original or a press — a new press starts on the next hole automatically, so presses can be pressed. No press can start after the last hole of its nine. In stroke play, “down” means strokes behind on net total for that bet. Each press wins, loses or pushes on its own and goes into the money ledger.</p>'
   + '<h2>Skins</h2><p>Lowest unique net score wins the hole. With carryovers on, a tied hole adds its skin to the next hole. Each skin is worth the bet amount from each other player. Skins still tied after 18 are not paid.</p>'
   + '<h2>Settle up</h2><p>All games are totalled into one net $ per player, then simplified into the fewest payments.</p></main>';
 };
@@ -112,6 +113,10 @@ screens.setup = function(){
   if (st.games.skins) h += toggle('skinsCarry', st.skinsCarry, 'Skins carry over', 'Tied holes roll to the next hole');
   if (st.games.nassau){
     h += '<label class="lbl">Nassau scoring</label><div class="seg"><button data-act="nassauMode" data-v="match" class="'+(st.nassauMode!=='stroke'?'on':'')+'">Match play</button><button data-act="nassauMode" data-v="stroke" class="'+(st.nassauMode==='stroke'?'on':'')+'">Stroke play</button></div>';
+    var pm = st.presses || 'off';
+    h += '<label class="lbl">Presses</label><div class="seg">' + [['off','Off'],['manual','Manual'],['auto','Auto'],['both','Both']].map(function(x){ return '<button data-act="pressMode" data-v="'+x[0]+'" class="'+(pm===x[0]?'on':'')+'">'+x[1]+'</button>'; }).join('') + '</div>';
+    if (pm === 'auto' || pm === 'both') h += '<label class="lbl">Auto-press when down</label><div class="seg"><button data-act="pressTrigger" data-v="2" class="'+(st.pressTrigger!==1?'on':'')+'">2 down</button><button data-act="pressTrigger" data-v="1" class="'+(st.pressTrigger===1?'on':'')+'">1 down</button></div>';
+    if (pm !== 'off') h += toggle('pressOverall', !!st.pressOverall, 'Presses on Overall 18 too', 'Off = presses on Front & Back 9 only');
     if (setup.players.length===4){
       h += toggle('nassauTeams', st.nassauTeams, '2-man teams (best net ball)', 'Otherwise every pair plays its own Nassau');
       if (st.nassauTeams){
@@ -157,7 +162,12 @@ function statusPanel(r, st){
     if (r.skins.carryLeft) o += '<small class="carry">'+r.skins.carryLeft+' skin'+(r.skins.carryLeft>1?'s':'')+' carrying to the next hole</small>';
   }
   if (r.nassau) r.nassau.matches.forEach(function(m){
-    o += '<div class="nas"><b>'+esc(m.label)+'</b>' + m.segments.map(function(s){ return '<small><i>'+s.name.split(' ')[0]+':</i> '+esc(s.status)+'</small>'; }).join('') + '</div>';
+    o += '<div class="nas"><b>'+esc(m.label)+'</b>' + m.segments.map(function(s, si){
+      var x = '<small><i>'+s.name.split(' ')[0]+':</i> '+esc(s.status)+'</small>';
+      (s.presses||[]).forEach(function(p){ x += '<small class="press">↳ Press #'+p.num+' (from '+(p.start+1)+(p.auto?', auto':'')+'): '+esc(p.status)+(p.manual && p.undoable ? ' <button class="ghost mini" data-act="undoPress" data-id="'+p.id+'">Undo</button>' : '')+'</small>'; });
+      (s.pressable||[]).forEach(function(q){ x += '<button class="pressbtn" data-act="press" data-m="'+m.key+'" data-s="'+si+'" data-side="'+q.side+'">'+esc(q.name)+': press '+s.name.split(' ')[0]+' from hole '+(q.start+1)+'</button>'; });
+      return x;
+    }).join('') + '</div>';
   });
   o += '<div class="srow"><b>Money</b><div>' + P.map(function(p,i){ return '<span>'+esc(p.name)+' <b class="'+moneyCls(r.total[i])+'">'+money(r.total[i])+'</b></span>'; }).join('') + '</div></div>';
   return o + '</section>';
@@ -188,12 +198,17 @@ function summaryHTML(rd, readOnly){
     o += '</tbody></table><small class="muted">$'+st.bet+' per point difference vs each other player.</small></section>';
   }
   if (r.nassau){
-    o += '<section class="card"><h2>Nassau <small class="muted">'+(st.nassauMode==='stroke'?'stroke play':'match play')+'</small></h2>';
+    var pmTxt = {manual:'manual presses', auto:'auto presses '+(st.pressTrigger===1?'1':'2')+' down', both:'manual + auto presses '+(st.pressTrigger===1?'1':'2')+' down'}[st.presses||'off'];
+    o += '<section class="card"><h2>Nassau <small class="muted">'+(st.nassauMode==='stroke'?'stroke play':'match play')+(pmTxt?' · '+pmTxt+(st.pressOverall?' (incl. overall)':''):'')+'</small></h2>';
     r.nassau.matches.forEach(function(m){
       o += '<div class="nas"><b>'+esc(m.label)+'</b>' + m.segments.map(function(s){
         var w = s.result==='a' ? m.a : s.result==='b' ? m.b : null;
         var res = s.result==='push' ? 'Push' : w ? w.map(function(k){return P[k].name;}).join(' & ')+' +$'+st.bet : 'In progress';
-        return '<div class="rowsb"><span>'+s.name+'</span><span class="muted">'+esc(s.status)+'</span><b>'+esc(res)+'</b></div>';
+        var x = '<div class="rowsb"><span>'+s.name+'</span><span class="muted">'+esc(s.status)+'</span><b>'+esc(res)+'</b></div>';
+        (s.presses||[]).forEach(function(p){ var pw = p.result==='a' ? m.a : p.result==='b' ? m.b : null;
+          var pr = p.result==='push' ? 'Push' : pw ? pw.map(function(k){return P[k].name;}).join(' & ')+' +$'+st.bet : 'In progress';
+          x += '<div class="rowsb press"><span>↳ Press #'+p.num+' <small>from '+(p.start+1)+(p.auto?' · auto':' · '+esc(p.side==='a'?m.An:m.Bn))+'</small></span><span class="muted">'+esc(p.status)+'</span><b>'+esc(pr)+'</b></div>'; });
+        return x;
       }).join('') + '</div>';
     });
     o += '<div class="srow"><b>Nassau $</b><div>' + P.map(function(p,i){ return '<span>'+esc(p.name)+' <b class="'+moneyCls(r.nassau.money[i])+'">'+money(r.nassau.money[i])+'</b></span>'; }).join('') + '</div></div></section>';
@@ -317,6 +332,10 @@ var acts = {
   bet: function(d){ setup.settings.bet = +d.v; persist(); render(); },
   strokeMode: function(d){ setup.settings.strokeMode = d.v; persist(); render(); },
   nassauMode: function(d){ setup.settings.nassauMode = d.v; persist(); render(); },
+  pressMode: function(d){ setup.settings.presses = d.v; if (!setup.settings.pressTrigger) setup.settings.pressTrigger = 2; persist(); render(); },
+  pressTrigger: function(d){ setup.settings.pressTrigger = +d.v; persist(); render(); },
+  press: function(d){ var res = E.addPress(round, getCourse(round.courseId), d.m, +d.s, d.side); if (!res.ok){ toast(res.reason); return; } persist(); render(); toast('Press starts on hole '+(res.press.start+1)); },
+  undoPress: function(d){ if (E.undoPress(round, getCourse(round.courseId), d.id)){ persist(); render(); toast('Press removed'); } else toast('Can\'t undo — scores already entered on its first hole'); },
   startRound: function(){
     var st = setup.settings, errs = [];
     setup.players.forEach(function(p,i){ if (!p.name.trim()) errs.push('Player '+(i+1)+' needs a name'); if (!E.isNum(p.index)) errs.push((p.name||'Player '+(i+1))+' needs a Handicap Index'); });
@@ -329,7 +348,7 @@ var acts = {
     setup.players.forEach(function(p){ upsertPlayer(p); });
     round = { id: uid(), courseId: setup.courseId, started: Date.now(), hole: 0,
       players: setup.players.map(function(p){ return { pid:p.pid, name:p.name.trim(), index:p.index, teeId:p.teeId }; }),
-      settings: clone(st), scores: setup.players.map(function(){ return new Array(18).fill(null); }) };
+      settings: clone(st), presses: [], scores: setup.players.map(function(){ return new Array(18).fill(null); }) };
     if (!(st.nassauTeams && setup.players.length===4)) round.settings.nassauTeams = false;
     go('hole');
   },
@@ -430,11 +449,14 @@ if (DEMO){
   mem[LS.players] = [{id:'p1',name:'Bob',index:12.4,teeId:'blue',updated:Date.now()},{id:'p2',name:'Mike',index:6.1,teeId:'blue',updated:Date.now()},{id:'p3',name:'Dave',index:18.7,teeId:'white',updated:Date.now()},{id:'p4',name:'Steve',index:+0.8,teeId:'black',updated:Date.now()}];
   setup = defaultSetup(); setup.players = [{pid:'p1',name:'Bob',index:12.4,teeId:'blue'},{pid:'p2',name:'Mike',index:6.1,teeId:'blue'},{pid:'p3',name:'Dave',index:18.7,teeId:'white'},{pid:'p4',name:'Steve',index:-0.8,teeId:'black'}];
   setup.settings.games.stableford = true; setup.settings.bet = 2;
+  if (/^press/.test(mode)){ setup.settings.presses = 'both'; setup.settings.games.stableford = false; }
   if (mode !== 'setup'){
     var demoScores = [[6,5,4,4,5,6,3,5,5, 5,6,4,4,6,3,5,6,5],[5,4,4,3,5,5,3,4,4, 4,5,3,5,5,3,4,5,4],[7,5,5,4,6,6,4,5,5, 5,6,4,5,6,4,5,6,5],[5,4,4,3,4,5,3,4,4, 4,5,3,4,4,3,4,5,4]];
     round = { id:'demo', courseId:'yolo-fliers', started:Date.now(), hole: mode==='hole'?4:17, players: clone(setup.players), settings: clone(setup.settings), scores: demoScores.map(function(s){ return mode==='hole' ? s.map(function(v,k){ return k<4?v:null; }) : s; }) };
   }
-  ui = { screen: mode };
+  if (mode === 'press'){ round.hole = 6; round.scores = round.scores.map(function(s){ return s.map(function(v,k){ return k<6?v:null; }); }); round.presses = [{ id:'demo1', m:'0-1', s:0, start:6, side:'a' }]; }
+  if (mode === 'presssummary'){ round.presses = [{ id:'demo2', m:'0-1', s:0, start:4, side:'a' }, { id:'demo3', m:'0-3', s:1, start:12, side:'a' }]; }
+  ui = { screen: mode === 'press' ? 'hole' : mode === 'presssummary' ? 'summary' : mode };
 }
 render();
 if ('serviceWorker' in navigator && /^https?:/.test(location.protocol) && !DEMO) navigator.serviceWorker.register('sw.js').catch(function(){});

@@ -69,42 +69,42 @@ var Engine = (function(){
       res.stableford = { points: pts, money: m };
     }
 
-    // ---- Nassau
+    // ---- Nassau (with optional manual / automatic presses)
     if (games.nassau){
-      var matches = [];
-      if (st.nassauTeams && P === 4){
-        var pairings = [[[0,1],[2,3]], [[0,2],[1,3]], [[0,3],[1,2]]];
-        var pr = pairings[st.teamPairing||0];
-        matches.push({ a: pr[0], b: pr[1] });
-      } else {
-        for (var a=0;a<P;a++) for (var b=a+1;b<P;b++) matches.push({ a:[a], b:[b] });
-      }
+      var matches = nassauMatches(st, P);
+      var pmode = st.presses || 'off';
+      var autoOn = pmode === 'auto' || pmode === 'both', manualOn = pmode === 'manual' || pmode === 'both';
+      var trig = st.pressTrigger === 1 ? 1 : 2;
+      var manual = (round.presses || []);
       var nm = zero();
+      var SEGS = [['Front 9', FRONT], ['Back 9', BACK], ['Overall 18', ALL]];
       matches.forEach(function(mt){
         var members = mt.a.concat(mt.b);
         var sideNet = function(side, h){ return Math.min.apply(null, side.map(function(k){ return players[k].netMatch[h]; })); };
         var hc = function(h){ return members.every(function(k){ return isNum(players[k].gross[h]); }); };
+        var anyScore = function(h){ return members.some(function(k){ return isNum(players[k].gross[h]); }); };
         mt.label = mt.a.map(function(k){return players[k].name;}).join(' & ') + ' vs ' + mt.b.map(function(k){return players[k].name;}).join(' & ');
         var An = mt.a.map(function(k){return players[k].name;}).join('/'), Bn = mt.b.map(function(k){return players[k].name;}).join('/');
+        mt.An = An; mt.Bn = Bn;
         mt.holes = ALL.map(function(h){ if(!hc(h)) return null; var x=sideNet(mt.a,h), y=sideNet(mt.b,h); return x<y?'a':(y<x?'b':'h'); });
-        mt.segments = [['Front 9', FRONT], ['Back 9', BACK], ['Overall 18', ALL]].map(function(sg){
-          var holes = sg[1], played = holes.filter(hc), remaining = holes.length - played.length;
-          var out = { name: sg[0], played: played.length, remaining: remaining, result: null };
-          if (st.nassauMode === 'stroke'){
-            var ta = sum(played.map(function(h){ return sideNet(mt.a,h); })), tb = sum(played.map(function(h){ return sideNet(mt.b,h); }));
-            out.diff = tb - ta; // positive = side a ahead
+        function evalBet(holes){
+          var played = holes.filter(hc), remaining = holes.length - played.length;
+          var out = { played: played.length, remaining: remaining, result: null, trigger: null, holes: holes };
+          var stroke = st.nassauMode === 'stroke';
+          var aw=0, bw=0, ta=0, tb=0, closed=null;
+          played.forEach(function(h, k){
+            if (closed) return;
+            var d;
+            if (stroke){ ta += sideNet(mt.a,h); tb += sideNet(mt.b,h); d = tb - ta; }
+            else { var r = mt.holes[h]; if (r==='a') aw++; else if (r==='b') bw++; d = aw - bw;
+              var left = holes.length - (k+1); if (Math.abs(d) > left) closed = { left:left, diff:d }; }
+            if (out.trigger === null && Math.abs(d) >= trig) out.trigger = { hole: h, down: d > 0 ? 'b' : 'a' };
+          });
+          if (stroke){
+            out.diff = tb - ta;
             if (remaining === 0) out.result = ta < tb ? 'a' : (tb < ta ? 'b' : 'push');
-            out.status = played.length === 0 ? 'Not started' : (out.diff === 0 ? 'Tied' : (out.diff > 0 ? An : Bn) + ' by ' + Math.abs(out.diff)) + (remaining ? ' thru ' + played.length : '');
+            out.status = played.length === 0 ? 'Not started' : (out.diff === 0 ? 'Tied' : (out.diff > 0 ? An : Bn) + ' by ' + Math.abs(out.diff)) + (remaining ? ' thru ' + (played[played.length-1]+1) : '');
           } else {
-            var aw=0, bw=0, closed=null;
-            // walk in hole order to detect early close-out
-            var seq = holes.filter(hc);
-            seq.forEach(function(h, k){
-              if (closed) return;
-              var r = mt.holes[h]; if (r==='a') aw++; else if (r==='b') bw++;
-              var left = holes.length - (k+1);
-              if (Math.abs(aw-bw) > left) closed = { left:left, diff:aw-bw };
-            });
             out.diff = aw - bw;
             if (closed){ out.result = closed.diff > 0 ? 'a' : 'b'; out.closedLeft = closed.left; }
             else if (remaining === 0) out.result = aw===bw ? 'push' : (aw>bw?'a':'b');
@@ -112,11 +112,55 @@ var Engine = (function(){
             if (played.length === 0) out.status = 'Not started';
             else if (closed && closed.left > 0) out.status = (closed.diff>0?An:Bn) + ' won ' + Math.abs(closed.diff) + '&' + closed.left;
             else if (remaining === 0) out.status = out.diff===0 ? 'Halved' : (out.diff>0?An:Bn) + ' won ' + d2 + ' up';
-            else out.status = (out.diff===0 ? 'All square' : (out.diff>0?An:Bn) + ' ' + d2 + ' up') + ' thru ' + played.length;
+            else out.status = (out.diff===0 ? 'All square' : (out.diff>0?An:Bn) + ' ' + d2 + ' up') + ' thru ' + (played[played.length-1]+1);
           }
           if (out.result === 'a' || out.result === 'b'){
             var win = out.result==='a'? mt.a : mt.b, lose = out.result==='a'? mt.b : mt.a;
             win.forEach(function(k){ nm[k] += bet; }); lose.forEach(function(k){ nm[k] -= bet; });
+            out.money = bet;
+          }
+          return out;
+        }
+        mt.segments = SEGS.map(function(sg, si){
+          var holes = sg[1], end = holes[holes.length-1];
+          var out = evalBet(holes); out.name = sg[0]; out.presses = [];
+          var pressesHere = pmode !== 'off' && (si < 2 || st.pressOverall);
+          if (pressesHere){
+            // manual presses recorded on the round
+            var queue = [out];
+            if (manualOn) manual.filter(function(p){ return p.m === mt.key && p.s === si && p.start <= end; }).forEach(function(p){
+              var pb = evalBet(holes.filter(function(h){ return h >= p.start; }));
+              pb.start = p.start; pb.side = p.side; pb.manual = true; pb.id = p.id; pb.undoable = !anyScore(p.start);
+              out.presses.push(pb); queue.push(pb);
+            });
+            // automatic presses: each bet spawns one press when the losing side first goes N down
+            if (autoOn){
+              for (var qi = 0; qi < queue.length && qi < 60; qi++){
+                var bt = queue[qi];
+                if (bt.trigger && bt.trigger.hole < end){
+                  var st0 = bt.trigger.hole + 1;
+                  var pb2 = evalBet(holes.filter(function(h){ return h >= st0; }));
+                  pb2.start = st0; pb2.side = bt.trigger.down; pb2.auto = true;
+                  out.presses.push(pb2); queue.push(pb2);
+                }
+              }
+            }
+            out.presses.sort(function(x, y){ return x.start - y.start || (x.auto?1:0) - (y.auto?1:0); });
+            out.presses.forEach(function(p, k){ p.num = k + 1; });
+            // manual press availability: side down in any open bet, starting at first unplayed hole of this segment
+            if (manualOn){
+              var firstOpen = null; for (var hh = 0; hh < holes.length; hh++) if (!hc(holes[hh])){ firstOpen = holes[hh]; break; }
+              out.pressable = [];
+              if (firstOpen !== null && firstOpen <= end){
+                [out].concat(out.presses).forEach(function(bt2){
+                  if (bt2.result || !bt2.diff) return;
+                  if (st.nassauMode !== 'stroke' && bt2.played === 0) return;
+                  var down = bt2.diff > 0 ? 'b' : 'a';
+                  var dup = out.presses.some(function(p){ return p.start === firstOpen && p.side === down; });
+                  if (!dup && !out.pressable.some(function(x){ return x.side === down; })) out.pressable.push({ side: down, start: firstOpen, name: down==='a'?An:Bn });
+                });
+              }
+            }
           }
           return out;
         });
@@ -151,6 +195,38 @@ var Engine = (function(){
     res.settlements = settle(total);
     return res;
   }
+  function nassauMatches(st, P){
+    var m = [];
+    if (st.nassauTeams && P === 4){
+      var pairings = [[[0,1],[2,3]], [[0,2],[1,3]], [[0,3],[1,2]]];
+      var pr = pairings[st.teamPairing||0];
+      m.push({ a: pr[0], b: pr[1], key: 'T' });
+    } else {
+      for (var a=0;a<P;a++) for (var b=a+1;b<P;b++) m.push({ a:[a], b:[b], key: a+'-'+b });
+    }
+    return m;
+  }
+  // Manual press: the side that is down in match `key`, segment si (0 front,1 back,2 overall) presses from the next unplayed hole.
+  function addPress(round, course, key, si, side){
+    var r = computeRound(round, course);
+    if (!r.nassau) return { ok:false, reason:'Nassau not active' };
+    var mt = r.nassau.matches.filter(function(m){ return m.key === key; })[0];
+    if (!mt) return { ok:false, reason:'No such match' };
+    var sg = mt.segments[si];
+    if (!sg.pressable) return { ok:false, reason:'Manual presses not enabled for this bet' };
+    var opt = sg.pressable.filter(function(x){ return !side || x.side === side; })[0];
+    if (!opt) return { ok:false, reason:'Not down / nothing left to press' };
+    var p = { id: 'p' + Math.random().toString(36).slice(2,8), m: key, s: si, start: opt.start, side: opt.side };
+    round.presses = (round.presses || []).concat([p]);
+    return { ok:true, press:p };
+  }
+  function undoPress(round, course, id){
+    var r = computeRound(round, course), ok = false;
+    if (r.nassau) r.nassau.matches.forEach(function(m){ m.segments.forEach(function(s){ s.presses.forEach(function(p){ if (p.id === id && p.undoable) ok = true; }); }); });
+    if (!ok) return false;
+    round.presses = (round.presses || []).filter(function(p){ return p.id !== id; });
+    return true;
+  }
   function settle(total){
     var cr = [], db = [], out = [];
     total.forEach(function(v,k){ if (v>0.004) cr.push({k:k,v:v}); else if (v<-0.004) db.push({k:k,v:-v}); });
@@ -165,7 +241,7 @@ var Engine = (function(){
     return out;
   }
   return { courseHandicap: courseHandicap, strokesOnHole: strokesOnHole, parseIndex: parseIndex, fmtIndex: fmtIndex, fmtCH: fmtCH,
-           computeRound: computeRound, settle: settle, findTee: findTee, sum: sum, isNum: isNum };
+           computeRound: computeRound, settle: settle, addPress: addPress, undoPress: undoPress, findTee: findTee, sum: sum, isNum: isNum };
 })();
 if (typeof module !== 'undefined') module.exports = Engine;
 /*ENGINE-END*/
